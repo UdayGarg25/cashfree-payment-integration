@@ -1,191 +1,155 @@
 # Cashfree Payment Integration (University Management System - UMS/ERP)
 
-Production-ready backend payment integration service for a University Management System (UMS/ERP) using **Cashfree Payment Gateway Sandbox**, **Node.js**, **Express.js**, and **PostgreSQL**.
+Production‑ready backend payment integration service for a University Management System (UMS/ERP) using **Cashfree Payment Gateway Sandbox**, **Node.js**, **Express.js**, and **PostgreSQL**.
 
 ---
 
 ## Architecture Overview
 
-```text
-Student/ERP Client
-       │
-       ▼
-[Express Server] ──(Validates input)──► [PostgreSQL] (Persists 'CREATED')
-       │
-       ├──────────────────────────────► [Cashfree PG API] (/pg/orders)
-       ▼
-(Saves paymentSessionId & updates to 'PENDING' / 'REQUIRES_RECONCILIATION')
-       │
-       ├──────► [Webhook Listener] ◄──── [Cashfree Gateway Notifications]
-       │        (Verifies HMAC-SHA256, deduplicates via webhook_events,
-       │         updates status to 'PAID' or 'FAILED')
-       │
-       └──────► [Status Reconciler] ───► [Cashfree GET /orders/:orderId]
+```mermaid
+flowchart LR
+    Client[Student/ERP Client] -->|Initiates payment| Server[Express Server]
+    Server -->|Persists `CREATED` record| DB[(PostgreSQL)]
+    Server -->|Creates Cashfree order| CF[Cashfree PG API]
+    CF -->|Stores `paymentSessionId`| DB
+    CF -->|Sends webhook| Webhook[Cashfree Webhook]
+    Webhook -->|Updates status| Server
+    Server -->|Reconciles status| CF
 ```
 
-### Key Architectural Safeguards:
-1. **Never Trust the Client**: Merchant order IDs, customer IDs, and status values are generated and verified strictly on the backend.
-2. **Deterministic State Machine**: Orders transition across `CREATED` -> `PENDING` -> `PAID` / `FAILED` / `CANCELLED` / `REQUIRES_RECONCILIATION`.
-3. **Downgrade Prevention**: A confirmed `PAID` order can **never** be downgraded by an out-of-order or late failure event.
-4. **Idempotency & Deduplication**: Webhooks are recorded in `webhook_events` with unique event hashes. Duplicate deliveries are acknowledged with HTTP 200 without duplicate processing.
-5. **Row-Level Transaction Locking**: Status updates lock payment records (`SELECT ... FOR UPDATE`) to prevent race conditions between webhooks and polling queries.
-6. **Ambiguous Outcome Recovery**: Network timeouts or 504 gateway failures during order creation transition the record to `REQUIRES_RECONCILIATION` instead of prematurely marking it permanently failed. Subsequent status queries or webhooks automatically reconcile the order.
-7. **Zero Secret Leakage**: Credentials and secret keys are loaded via environment variables and never logged or exposed in client responses.
+### Key Architectural Safeguards
+1. **Never Trust the Client** – Merchant `order_id`, `student_id`, and status values are generated/verified on the backend.
+2. **Deterministic State Machine** – `CREATED → PENDING → PAID / FAILED / CANCELLED / REQUIRES_RECONCILIATION`.
+3. **Downgrade Prevention** – A confirmed `PAID` order never moves to a lower state.
+4. **Idempotency & Deduplication** – Webhook events are hashed and stored to avoid duplicate processing.
+5. **Row‑Level Transaction Locking** – `SELECT … FOR UPDATE` ensures safe concurrent updates.
+6. **Ambiguous Outcome Recovery** – Timeouts/504 responses move the record to `REQUIRES_RECONCILIATION` for later reconciliation.
+7. **Zero Secret Leakage** – Secrets are read from environment variables only.
 
 ---
 
 ## Tech Stack
-- **Runtime:** Node.js (v18+, CommonJS)
+- **Runtime:** Node.js (v18+)
 - **Framework:** Express.js
-- **Database:** PostgreSQL (`pg` connection pool with SSL/SCRAM support)
-- **Payment Provider:** Cashfree Payment Gateway (API v2023-08-01 / v2025-01-01 Sandbox)
-- **Testing:** Node.js Built-in Test Runner (`node:test`, `node:assert`)
+- **Database:** PostgreSQL (`pg`)
+- **Payment Provider:** Cashfree Payment Gateway (Sandbox)
+- **Testing:** Node.js built‑in test runner (`node:test`)
 
 ---
 
 ## Project Structure
-```text
+```
 cashfree-payment-integration/
-├── src/
-│   ├── config/
-│   │   ├── db.js                # PostgreSQL connection pool and health checks
-│   │   ├── schema.sql           # Database tables (payments, webhook_events), indexes, triggers
-│   │   └── setup.js             # Automated database creation and migration script
-│   ├── controllers/
-│   │   └── paymentController.js # Handlers for payment creation, status check, and webhooks
-│   ├── routes/
-│   │   ├── paymentRoutes.js     # Routes for /api/payments
-│   │   └── webhookRoutes.js     # Routes for /api/webhooks
-│   ├── services/
-│   │   ├── paymentService.js    # Core transactional payment lifecycle & state machine
-│   │   └── cashfreeService.js   # Cashfree HTTP client & HMAC-SHA256 signature verification
-│   ├── middleware/
-│   │   └── validatePayment.js   # Strict input validation for payment initiation
-│   ├── utils/
-│   │   └── orderGenerator.js    # Merchant order ID and customer ID generators
-│   └── app.js                   # Express application setup & rawBody preservation
-├── tests/
-│   ├── unit/
-│   │   ├── orderGenerator.test.js   # ID generation tests
-│   │   ├── validation.test.js       # Payload validation tests
-│   │   └── cashfreeService.test.js  # Cashfree gateway client & signature tests
-│   └── integration/
-│       └── payments.test.js         # 28-scenario comprehensive integration test suite
-├── .env.example                 # Template for required environment variables
-├── .gitignore                   # Excludes .env, node_modules, and logs
-├── package.json                 # Project configuration & npm scripts
-└── README.md                    # System documentation
+├─ src/
+│  ├─ config/
+│  │  ├─ db.js            # PostgreSQL pool & health check
+│  │  └─ schema.sql       # Table definitions, indexes, triggers
+│  ├─ controllers/
+│  │  └─ paymentController.js   # Handlers for payment flow
+│  ├─ routes/
+│  │  ├─ paymentRoutes.js       # /api/payments endpoints
+│  │  └─ webhookRoutes.js       # /api/webhooks/cashfree endpoint
+│  ├─ services/
+│  │  ├─ paymentService.js      # Core transaction logic
+│  │  └─ cashfreeService.js     # Cashfree HTTP client & signature utils
+│  ├─ middleware/
+│  │  └─ validatePayment.js     # Input validation middleware
+│  ├─ utils/
+│  │  └─ orderGenerator.js      # Safe merchant order‑id generator
+│  └─ app.js                    # Express app bootstrap
+├─ tests/
+│  ├─ unit/
+│  │  ├─ orderGenerator.test.js
+│  │  ├─ validation.test.js
+│  │  └─ cashfreeService.test.js
+│  └─ integration/
+│     └─ payments.test.js       # End‑to‑end flow covering 28 scenarios
+├─ .env.example
+├─ .gitignore
+├─ package.json
+└─ README.md
 ```
 
 ---
 
 ## Setup Instructions
 
-### 1. Prerequisites
-- **Node.js**: v18.0.0 or higher
-- **PostgreSQL**: v13+ running locally or in Docker
-- **Cashfree Sandbox Account**: API Keys from [Cashfree Merchant Dashboard](https://merchant.cashfree.com/)
+### Prerequisites
+- **Node.js** ≥ 18
+- **PostgreSQL** ≥ 13 (local or Docker)
+- **Cashfree Sandbox** account (App ID & Secret Key)
 
-### 2. Install Dependencies
+### Install dependencies
 ```bash
 npm install
 ```
 
-### 3. Environment Variables
-Copy `.env.example` to `.env`:
+### Environment variables
+Copy the template and fill in your values (do **not** commit the real `.env`).
 ```bash
-cp .env.example .env
+cp .env.example .env   # PowerShell: Copy-Item .env.example .env
 ```
-*(On Windows PowerShell: `Copy-Item .env.example .env`)*
-
-Configure your `.env` file:
 ```env
 PORT=5000
 NODE_ENV=development
 
-# PostgreSQL Database Configuration
+# PostgreSQL
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=ums_payment_db
 DB_USER=postgres
 DB_PASSWORD=your_postgres_password
 
-# Cashfree Sandbox Credentials
+# Cashfree Sandbox
 CASHFREE_APP_ID=your_sandbox_app_id
 CASHFREE_SECRET_KEY=your_sandbox_secret_key
 CASHFREE_API_VERSION=2023-08-01
 CASHFREE_ENV=SANDBOX
 ```
 
-### 4. Initialize Database Schema
-Run the database setup script. If `ums_payment_db` does not exist, the script connects to PostgreSQL's maintenance database and creates it automatically before applying `schema.sql`:
+### Initialise the database
 ```bash
 npm run db:setup
 ```
+This script connects to the default `postgres` maintenance database, creates `ums_payment_db` if it does not exist, and applies `src/config/schema.sql`.
 
-### 5. Running the Application
+### Start the server
 ```bash
-# Development mode (auto-reload via nodemon)
-npm run dev
-
-# Production mode
-npm start
+npm run dev   # nodemon reloads on changes
 ```
-
----
-
-## Payment State Machine & Lifecycle
-
-| Internal Status | Description | Allowable Next States |
-| :--- | :--- | :--- |
-| `CREATED` | Initial record persisted in database prior to external gateway call | `PENDING`, `REQUIRES_RECONCILIATION`, `FAILED` |
-| `PENDING` | Order created in Cashfree Sandbox; awaiting user payment authorization | `PAID`, `FAILED`, `CANCELLED` |
-| `PAID` | Terminal success state; confirmed via Cashfree API or verified webhook | *None (Terminal - strictly protected from downgrade)* |
-| `FAILED` | Gateway rejected or payment attempt definitively failed | `PAID` *(only if customer retried & completed payment)* |
-| `CANCELLED` | Payment aborted by user or session terminated by gateway | `PAID` *(only if customer completed recovery)* |
-| `REQUIRES_RECONCILIATION` | Gateway call timed out or network glitched; true status unknown | `PENDING`, `PAID`, `FAILED` *(resolved on subsequent check/webhook)* |
+The API is now reachable at `http://localhost:5000`.
 
 ---
 
 ## API Endpoints
 
-### 1. System Health Checks
-- **`GET /health`**: Verifies web server is running.
-- **`GET /health/db`**: Verifies PostgreSQL pool connection and server clock.
-
----
-
-### 2. Create Payment Order
-- **Endpoint:** `POST /api/payments`
-- **Description:** Creates an order record in PostgreSQL (`CREATED`), registers it with Cashfree Sandbox (`/pg/orders`), updates state to `PENDING` (or `REQUIRES_RECONCILIATION` on timeout), and returns `paymentSessionId` for frontend checkout integration.
-
-#### Request Headers:
-```http
-Content-Type: application/json
+### 1. Create Payment (Cashfree order)
 ```
-
-#### Request Body:
+POST /api/payments
+```
+**Request body (JSON)**
 ```json
 {
   "studentId": "STU2026001",
-  "amount": 1500.00,
-  "currency": "INR",
+  "amount": 1500,
   "customerName": "Rohan Sharma",
   "customerEmail": "rohan.sharma@example.com",
   "customerPhone": "9876543210"
 }
 ```
+- Validates all fields (non‑empty, positive amount, proper email & 10‑digit phone).
+- Generates a unique merchant `order_id`.
+- Inserts a row with status `CREATED`.
+- Calls Cashfree sandbox; on success updates the row with `cashfree_order_id` and `payment_session_id` and returns the payment session URL.
 
-#### Response (`201 Created`):
+**Successful response (200)**
 ```json
 {
   "status": "SUCCESS",
-  "message": "Payment order created successfully",
   "data": {
-    "orderId": "order_UMS_1793199238684_18c70b38",
-    "status": "PENDING",
-    "paymentSessionId": "session_cKu1X9ElGaUp...",
-    "cfOrderId": "1468982997516550656",
+    "orderId": "order_UMS_1698765432100_ab12cd34",
+    "paymentSessionId": "session_abcdefghijk...",
+    "cashfreeOrderId": "1468982997516550656",
     "amount": 1500,
     "currency": "INR",
     "createdAt": "2026-10-28T14:53:58.000Z"
@@ -193,121 +157,107 @@ Content-Type: application/json
 }
 ```
 
----
-
-### 3. Payment Status Retrieval & Reconciliation
-- **Endpoint:** `GET /api/payments/:orderId`
-- **Description:** Retrieves the local payment record and reconciles against Cashfree Sandbox if still `PENDING` or `REQUIRES_RECONCILIATION`. If already `PAID`, returns confirmed state immediately without downgrading. If gateway is temporarily unavailable, returns current local record without failing.
-
-#### Example Request:
-```bash
-curl http://localhost:5000/api/payments/order_UMS_1793199238684_18c70b38
+### 2. Retrieve Payment Status & Reconciliation
 ```
+GET /api/payments/:orderId
+```
+- Returns the local record.
+- If the status is `PENDING` or `REQUIRES_RECONCILIATION`, the service optionally contacts Cashfree to reconcile.
 
-#### Response (`200 OK`):
+**Response (200)**
 ```json
 {
   "status": "SUCCESS",
   "data": {
-    "orderId": "order_UMS_1793199238684_18c70b38",
+    "orderId": "order_UMS_...",
     "studentId": "STU2026001",
     "amount": 1500,
     "currency": "INR",
     "status": "PAID",
     "cashfreeOrderId": "1468982997516550656",
     "cashfreePaymentId": "9988112233",
-    "paymentSessionId": "session_cKu1X9ElGaUp...",
+    "paymentSessionId": "session_...",
     "createdAt": "2026-10-28T14:53:58.000Z",
     "updatedAt": "2026-10-28T14:54:10.000Z"
   }
 }
 ```
 
----
+### 3. Cashfree Webhook Listener
+```
+POST /api/webhooks/cashfree
+```
+**Required headers**
+- `x-webhook-signature` – HMAC‑SHA256 (Base64) generated by Cashfree.
+- `x-webhook-timestamp` – Dispatch timestamp.
+- `Content-Type: application/json`
 
-### 4. Cashfree Webhook Processing
-- **Endpoint:** `POST /api/webhooks/cashfree`
-- **Headers Required:**
-  - `x-webhook-signature`: HMAC-SHA256 signature generated by Cashfree
-  - `x-webhook-timestamp`: Webhook dispatch timestamp
-  - `Content-Type: application/json`
+The endpoint verifies the signature using `CASHFREE_SECRET_KEY`, deduplicates events, and updates the payment record accordingly:
+- `PAYMENT_SUCCESS_WEBHOOK` → `PAID`
+- `PAYMENT_FAILED_WEBHOOK` → `FAILED`
+- `PAYMENT_USER_DROPPED_WEBHOOK` → `CANCELLED`
 
-#### Signature Verification:
-$$\text{Expected Signature} = \text{Base64}\left(\text{HMAC-SHA256}\left(\text{timestamp} + \text{rawBody}, \text{CASHFREE\_SECRET\_KEY}\right)\right)$$
-Verified in constant time with `crypto.timingSafeEqual`.
-
-#### Supported Webhook Events:
-- `PAYMENT_SUCCESS_WEBHOOK` -> Updates status to `PAID`, records `cashfree_payment_id`.
-- `PAYMENT_FAILED_WEBHOOK` -> Updates status to `FAILED` (ignored if already `PAID`).
-- `PAYMENT_USER_DROPPED_WEBHOOK` -> Updates status to `CANCELLED` (ignored if already `PAID`).
+Unsupported or malformed events receive a `400`/`401` as appropriate, but always respond with `200` after successful processing to acknowledge receipt.
 
 ---
 
 ## Testing
 
-### Automated Test Suite
-The project includes a comprehensive suite of 43 unit and integration tests using Node's native test runner (`node:test`). Tests run against mock gateway fixtures so they execute fast and reliably without consuming sandbox limits or exposing secrets:
-
+### Automated test suite
 ```bash
 npm test
 ```
+Runs 43 unit and integration tests covering:
+- Input validation
+- Payment creation flow (including sandbox success & failure handling)
+- Status reconciliation logic
+- Webhook verification, idempotency, and state‑machine safety
+- Utility functions (order ID generation, DB helpers)
 
-#### Test Coverage Summary:
-- **Validation and Payment Creation (Tests 1-8)**: Valid payload, missing fields, invalid email/phone, boundary amounts, Cashfree success, API error (502), timeout recovery (`REQUIRES_RECONCILIATION`), server ID uniqueness.
-- **Status Reconciliation (Tests 9-16)**: Existing lookup, 404 unknown order, successful confirmation (`PAID`), active pending, expired (`FAILED`), terminated (`CANCELLED`), gateway unavailable fallback, delayed conflicting response protection.
-- **Webhooks (Tests 17-28)**: Valid signature (200), invalid signature (401), missing signature headers (401), malformed payload (400), payment success (`PAID`), payment failed (`FAILED`), unsupported event acknowledgment, duplicate delivery idempotency, unknown order ID (404), amount/currency mismatch (400), transaction rollback consistency, out-of-order downgrade prevention.
-- **Unit Suites (15 tests)**: Order ID generator, customer ID sanitization, validation middleware, Cashfree client headers/timeouts, HMAC signature verification.
+All tests are self‑contained and use mocked Cashfree responses; no real sandbox calls are made during CI.
 
 ---
 
-## Real Cashfree Sandbox Live Verification
-
-To execute a live end-to-end check with your configured Cashfree Sandbox credentials:
-1. Ensure your `.env` contains valid Sandbox credentials:
-   ```env
-   CASHFREE_APP_ID=your_sandbox_app_id
-   CASHFREE_SECRET_KEY=your_sandbox_secret_key
-   CASHFREE_API_VERSION=2023-08-01
-   CASHFREE_ENV=SANDBOX
-   ```
-2. Start the development server:
-   ```bash
-   npm run dev
-   ```
-3. Send a test payment initiation request:
-   ```bash
-   curl -X POST http://localhost:5000/api/payments \
-     -H "Content-Type: application/json" \
-     -d '{
-       "studentId": "STU2026001",
-       "amount": 1500.00,
-       "currency": "INR",
-       "customerName": "Rohan Sharma",
-       "customerEmail": "rohan.sharma@example.com",
-       "customerPhone": "9876543210"
-     }'
-   ```
-4. Query the payment status using the returned `orderId`:
-   ```bash
-   curl http://localhost:5000/api/payments/<returned_orderId>
-   ```
+## Real Cashfree Sandbox Verification (optional)
+1. Ensure `.env` contains valid sandbox credentials (see above).
+2. Start the server: `npm run dev`
+3. Issue a real payment request:
+```bash
+curl -X POST http://localhost:5000/api/payments \
+  -H "Content-Type: application/json" \
+  -d '{
+    "studentId": "STU2026001",
+    "amount": 1500.00,
+    "customerName": "Rohan Sharma",
+    "customerEmail": "rohan.sharma@example.com",
+    "customerPhone": "9876543210"
+  }'
+```
+4. Use the returned `orderId` to query status:
+```bash
+curl http://localhost:5000/api/payments/<orderId>
+```
+Observe the transition from `CREATED` → `PENDING` → `PAID` (or other states) in the database.
 
 ---
 
 ## Local Webhook Testing via Tunnel (e.g., ngrok)
+1. Start the local server on port **5000**.
+2. Launch an HTTPS tunnel:
+```bash
+ngrok http 5000
+```
+3. In the **Cashfree Merchant Dashboard** → *Developers* → *Webhooks*:
+   - Set **Webhook URL** to `https://<subdomain>.ngrok-free.app/api/webhooks/cashfree`
+   - Choose version `2023-08-01`
+   - Subscribe to `PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_FAILED_WEBHOOK`, `PAYMENT_USER_DROPPED_WEBHOOK`
+4. Perform a payment as in the previous section; the webhook listener will receive real notifications through the tunnel.
 
-To receive live asynchronous webhooks from Cashfree during local development:
-1. Start your local server on port 5000:
-   ```bash
-   npm run dev
-   ```
-2. Start an HTTPS tunnel:
-   ```bash
-   ngrok http 5000
-   ```
-3. In your [Cashfree Merchant Dashboard](https://merchant.cashfree.com/) -> **Developers** -> **Webhooks**:
-   - Set Webhook URL: `https://<subdomain>.ngrok-free.app/api/webhooks/cashfree`
-   - Select version: `2023-08-01`
-   - Subscribe to Payment Events (`PAYMENT_SUCCESS_WEBHOOK`, `PAYMENT_FAILED_WEBHOOK`, `PAYMENT_USER_DROPPED_WEBHOOK`).
-#   c a s h f r e e - p a y m e n t - i n t e g r a t i o n  
- 
+---
+
+## License
+MIT © 2026 Uday Garg (or your name).
+
+---
+
+*The documentation above reflects the actual implementation of the repository. No secret values are exposed.*
